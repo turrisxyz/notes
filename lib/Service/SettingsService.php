@@ -27,7 +27,7 @@ class SettingsService {
 		$this->l10n = $l10n;
 		$this->root = $root;
 		$this->attrs = [
-			'fileSuffix' => $this->getListAttrs('.txt', '.md'),
+			'fileSuffix' => $this->getListAttrs('.txt', '.md', 'custom'),
 			'notesPath' => [
 				'default' => function (string $uid) {
 					return $this->getDefaultNotesPath($uid);
@@ -47,6 +47,16 @@ class SettingsService {
 				},
 			],
 			'noteMode' => $this->getListAttrs('edit', 'preview'),
+			'customSuffix' => [
+				'default' => '.txt',
+				'validate' => function ($value) {
+					$out = ltrim(preg_replace('/[^A-Za-z0-9.-]/', '', $value), '.');
+					if (empty($out)) {
+						$out = 'txt';
+					}
+					return '.' . $out;
+				},
+			],
 		];
 	}
 
@@ -91,7 +101,7 @@ class SettingsService {
 				$settings[$name] = $value = $this->attrs[$name]['validate']($value);
 			}
 			if (!array_key_exists($name, $this->attrs)
-				|| empty($value)
+				|| $value === null
 				|| $value === $this->attrs[$name]['default']
 			) {
 				unset($settings[$name]);
@@ -113,7 +123,7 @@ class SettingsService {
 		// use default for empty settings
 		$toBeSaved = false;
 		foreach ($this->attrs as $name => $attr) {
-			if (!property_exists($settings, $name) || empty($settings->{$name})) {
+			if (!property_exists($settings, $name)) {
 				$defaultValue = $attr['default'];
 				if (is_callable($defaultValue)) {
 					$settings->{$name} = $defaultValue($uid);

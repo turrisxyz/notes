@@ -7,6 +7,7 @@ namespace OCA\Notes\Service;
 use OCP\Files\File;
 use OCP\Files\FileInfo;
 use OCP\Files\Folder;
+use OCP\Files\NotPermittedException;
 
 class NotesService {
 	private $metaService;
@@ -24,8 +25,9 @@ class NotesService {
 	}
 
 	public function getAll(string $userId) : array {
+		$customExtension = $this->getCustomExtension($userId);
 		$notesFolder = $this->getNotesFolder($userId);
-		$data = $this->gatherNoteFiles($notesFolder);
+		$data = self::gatherNoteFiles($customExtension, $notesFolder);
 		$fileIds = array_keys($data['files']);
 		// pre-load tags for all notes (performance improvement)
 		$this->noteUtil->getTagService()->loadTags($fileIds);
@@ -50,8 +52,9 @@ class NotesService {
 	}
 
 	public function get(string $userId, int $id) : Note {
+		$customExtension = $this->getCustomExtension($userId);
 		$notesFolder = $this->getNotesFolder($userId);
-		$note = new Note($this->getFileById($notesFolder, $id), $notesFolder, $this->noteUtil);
+		$note = new Note(self::getFileById($customExtension, $notesFolder, $id), $notesFolder, $this->noteUtil);
 		$this->metaService->update($userId, $note);
 		return $note;
 	}
@@ -101,8 +104,10 @@ class NotesService {
 
 		// get file name
 		$fileSuffix = $this->settings->get($userId, 'fileSuffix');
+		if ($fileSuffix === "custom") {
+			$fileSuffix = $this->settings->get($userId, 'customSuffix');
+		}
 		$filename = $this->noteUtil->generateFileName($folder, $title, $fileSuffix, -1);
-
 		// create file
 		$file = $folder->newFile($filename);
 
@@ -114,8 +119,9 @@ class NotesService {
 	 * @throws NoteDoesNotExistException if note does not exist
 	 */
 	public function delete(string $userId, int $id) {
+		$customExtension = $this->getCustomExtension($userId);
 		$notesFolder = $this->getNotesFolder($userId);
-		$file = $this->getFileById($notesFolder, $id);
+		$file = self::getFileById($customExtension, $notesFolder, $id);
 		$this->noteUtil->ensureNoteIsWritable($file);
 		$parent = $file->getParent();
 		$file->delete();
@@ -146,7 +152,7 @@ class NotesService {
 	/**
 	 * gather note files in given directory and all subdirectories
 	 */
-	private static function gatherNoteFiles(Folder $folder, string $categoryPrefix = '') : array {
+	private static function gatherNoteFiles(string $customExtension, Folder $folder, string $categoryPrefix = '') : array {
 		$data = [
 			'files' => [],
 			'categories' => [],
@@ -156,10 +162,10 @@ class NotesService {
 			if ($node->getType() === FileInfo::TYPE_FOLDER && $node instanceof Folder) {
 				$subCategory = $categoryPrefix . $node->getName();
 				$data['categories'][] = $subCategory;
-				$data_sub = self::gatherNoteFiles($node, $subCategory . '/');
+				$data_sub = self::gatherNoteFiles($customExtension, $node, $subCategory . '/');
 				$data['files'] = $data['files'] + $data_sub['files'];
 				$data['categories'] = $data['categories'] + $data_sub['categories'];
-			} elseif (self::isNote($node)) {
+			} elseif (self::isNote($node, $customExtension)) {
 				$data['files'][$node->getId()] = $node;
 			}
 		}
@@ -169,21 +175,85 @@ class NotesService {
 	/**
 	 * test if file is a note
 	 */
-	private static function isNote(FileInfo $file) : bool {
+	private static function isNote(FileInfo $file, string $customExtension) : bool {
 		static $allowedExtensions = ['txt', 'org', 'markdown', 'md', 'note'];
 		$ext = strtolower(pathinfo($file->getName(), PATHINFO_EXTENSION));
-		return $file->getType() === 'file' && in_array($ext, $allowedExtensions);
+		return $file->getType() === 'file' && (in_array($ext, $allowedExtensions) || $ext === $customExtension);
+	}
+
+	/**
+	 * Retrieve the value of user defined files extension
+	 */
+	private function getCustomExtension(string $userId) {
+		$suffix = $this->settings->get($userId, 'customSuffix');
+		return ltrim($suffix, ".");
 	}
 
 	/**
 	 * @throws NoteDoesNotExistException
 	 */
-	private static function getFileById(Folder $folder, int $id) : File {
+	private static function getFileById(string $customExtension, Folder $folder, int $id) : File {
 		$file = $folder->getById($id);
 
-		if (count($file) <= 0 || !($file[0] instanceof File) || !self::isNote($file[0])) {
+		if (!array_key_exists(0, $file) || !($file[0] instanceof File) || !self::isNote($file[0], $customExtension)) {
 			throw new NoteDoesNotExistException();
 		}
 		return $file[0];
+	}
+
+	/**
+	 * @NoAdminRequired
+	 * @NoCSRFRequired
+	 * @return \OCP\Files\File
+	 */
+	public function getAttachment(string $userId, int $noteid, string $path) : File {
+		$note = $this->get($userId, $noteid);
+		$notesFolder = $this->getNotesFolder($userId);
+		$path = str_replace('\\', '/', $path); // change windows style path
+		$p = explode('/', $note->getCategory());
+		// process relative target path
+		foreach (explode('/', $path) as $f) {
+			if ($f == '..') {
+				array_pop($p);
+			} elseif ($f !== '') {
+				array_push($p, $f);
+			}
+		}
+		$targetNode = $notesFolder->get(implode('/', $p));
+		assert($targetNode instanceof \OCP\Files\File);
+		return $targetNode;
+	}
+
+	/**
+	 * @param $userId
+	 * @param $noteid
+	 * @param $fileDataArray
+	 * @throws NotPermittedException
+	 * https://github.com/nextcloud/deck/blob/master/lib/Service/AttachmentService.php
+	 */
+	public function createImage(string $userId, int $noteid, $fileDataArray) {
+		$note = $this->get($userId, $noteid);
+		$notesFolder = $this->getNotesFolder($userId);
+		$parent = $this->noteUtil->getCategoryFolder($notesFolder, $note->getCategory());
+
+		// try to generate long id, if not available on system fall back to a shorter one
+		try {
+			$filename = bin2hex(random_bytes(16));
+		} catch (\Exception $e) {
+			$filename = uniqid();
+		}
+		$filename = $filename . '.' . explode('.', $fileDataArray['name'])[1];
+
+		// read uploaded file from disk
+		$fp = fopen($fileDataArray['tmp_name'], 'r');
+		$content = fread($fp, $fileDataArray['size']);
+		fclose($fp);
+
+		$result = [];
+		$result['filename'] = $filename;
+		$result['filepath'] = $parent->getPath() . '/' . $filename;
+		$result['wasUploaded'] = true;
+
+		$this->noteUtil->getRoot()->newFile($parent->getPath() . '/' . $filename, $content);
 	}
 }

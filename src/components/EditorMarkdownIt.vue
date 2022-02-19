@@ -5,6 +5,7 @@
 <script>
 
 import MarkdownIt from 'markdown-it'
+import { generateUrl } from '@nextcloud/router'
 
 export default {
 	name: 'EditorMarkdownIt',
@@ -14,14 +15,27 @@ export default {
 			type: String,
 			required: true,
 		},
+		noteid: {
+			type: String,
+			required: true,
+		},
 	},
 
 	data() {
+
+		const md = new MarkdownIt({
+			linkify: true,
+			breaks: true,
+		})
+
+		md.use(require('markdown-it-task-checkbox'), {
+			disabled: true,
+			liClass: 'task-list-item',
+		})
+
 		return {
 			html: '',
-			md: new MarkdownIt({
-				linkify: true,
-			}),
+			md,
 		}
 	},
 
@@ -30,12 +44,46 @@ export default {
 	},
 
 	created() {
+		this.setImageRule(this.noteid)
 		this.onUpdate()
 	},
 
 	methods: {
 		onUpdate() {
 			this.html = this.md.render(this.value)
+		},
+		setImageRule(id) {
+			// https://github.com/markdown-it/markdown-it/blob/master/docs/architecture.md#renderer
+			// Remember old renderer, if overridden, or proxy to default renderer
+			const defaultRender = this.md.renderer.rules.image || function(tokens, idx, options, env, self) {
+				return self.renderToken(tokens, idx, options)
+			}
+
+			this.md.renderer.rules.image = function(tokens, idx, options, env, self) {
+				// If you are sure other plugins can't add `target` - drop check below
+				const token = tokens[idx]
+				const aIndex = token.attrIndex('src')
+				let path = token.attrs[aIndex][1]
+
+				if (!path.startsWith('http')) {
+					path = generateUrl('apps/notes/notes/{id}/attachment?path={path}', { id, path })
+				}
+
+				token.attrs[aIndex][1] = path
+				const lowecasePath = path.toLowerCase()
+				// pass token to default renderer.
+				if (lowecasePath.endsWith('jpg')
+					|| lowecasePath.endsWith('jpeg')
+					|| lowecasePath.endsWith('bmp')
+					|| lowecasePath.endsWith('webp')
+					|| lowecasePath.endsWith('gif')
+					|| lowecasePath.endsWith('png')) {
+					return defaultRender(tokens, idx, options, env, self)
+				} else {
+					const dlimgpath = generateUrl('svg/core/actions/download?color=ffffff')
+					return '<div class="download-file"><a href="' + path.replace(/"/g, '&quot;') + '"><div class="download-icon"><img class="download-icon-inner" src="' + dlimgpath + '">' + token.content + '</div></a></div>'
+				}
+			}
 		},
 	},
 
@@ -45,6 +93,7 @@ export default {
 .note-preview {
 	padding: 1em;
 	line-height: 1.5em;
+	word-wrap: break-word;
 
 	& h1, & h2, & h3, & h4, & h5, & h6 {
 		padding: 0;
@@ -126,5 +175,51 @@ export default {
 	& table td:empty::after {
 		content: '\00a0';
 	}
+
+	.task-list-item {
+		list-style-type: none;
+		input {
+			min-height: initial !important;
+		}
+		label {
+			cursor: default;
+		}
+	}
+
+	& img {
+		width: 75%;
+		margin-left: auto;
+		margin-right: auto;
+		display: block;
+	}
+
+	.download-file {
+		width: 75%;
+		margin-left: auto;
+		margin-right: auto;
+		display: block;
+		text-align: center;
+	}
+
+	.download-icon {
+		padding: 15px;
+		margin-left: auto;
+		margin-right: auto;
+		width: 75%;
+		border-radius: 10px;
+		background-color: var(--color-background-dark);
+		border: 1px solid transparent; // so that it does not move on hover
+	}
+
+	.download-icon:hover {
+		border: 1px var(--color-primary-element) solid;
+	}
+
+	.download-icon-inner {
+		height: 3em;
+		width: auto;
+		margin-bottom: 5px;
+	}
+
 }
 </style>
